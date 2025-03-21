@@ -6,10 +6,6 @@ phases:
       python: 3.9
   pre_build:
     commands:
-      - echo "🔧 Running repository priority protection fix..."
-      - chmod +x scripts/disable_yum_priorities.sh
-      - scripts/disable_yum_priorities.sh
-
       - echo "🔄 Updating package repositories..."
       - yum update -y
       - yum install -y postgresql15 awscli-2 nc
