@@ -1,0 +1,53 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.9
+  pre_build:
+    commands:
+      - echo "🔧 Running repository priority protection fix..."
+      - chmod +x scripts/disable_yum_priorities.sh
+      - scripts/disable_yum_priorities.sh
+
+      - echo "🔄 Updating package repositories..."
+      - yum update -y
+      - yum install -y postgresql15 awscli-2 nc
+
+      - echo "Fetching database credentials from AWS Secrets Manager..."
+      - export PGHOST=$(aws secretsmanager get-secret-value --secret-id $SECRET_NAME --query SecretString --output text | jq -r '.host')
+      - export PGUSER=$(aws secretsmanager get-secret-value --secret-id $SECRET_NAME --query SecretString --output text | jq -r '.username')
+      - export PGDATABASE="postgres"
+      - export PGPASSWORD=$(aws secretsmanager get-secret-value --secret-id $SECRET_NAME --query SecretString --output text | jq -r '.password')
+      - export PGPORT=$(aws secretsmanager get-secret-value --secret-id $SECRET_NAME --query SecretString --output text | jq -r '.port')
+      - echo "Check database reachability"
+      - nc -zv $PGHOST $PGPORT
+      - echo "Database is reachable"
+
+  build:
+    commands:
+      #Checking for Migrations to retry
+      - scripts/retry_migration.sh
+
+      # Generate list of migrations
+      - echo "Generating list of pending migrations..."
+
+      #Excludes the migration folders without migration.sql file.
+      - find migrations/ -mindepth 2 -maxdepth 2 -type f -name "migration.sql" | awk -F'/' '{print $(NF-1)}' | sort > migrations_list
+      - cat migrations_list
+
+      - echo "Starting migration processing..."
+      - scripts/process_migration.sh
+
+
+      - echo "Listing all the migration in waiting state"
+      - psql -h $PGHOST -U $PGUSER -d $PGDATABASE -t -A -F"," -c "SELECT migration_name FROM public.migrations WHERE applied_status = 'WAITING' ORDER BY started_at;" > /tmp/migrations_waiting
+      - cat /tmp/migrations_waiting
+      - echo "Starting to apply the migration"
+      - scripts/apply_migration.sh || EXIT_CODE=$?
+
+
+  post_build:
+    commands:
+      - if [ -z "$EXIT_CODE" ]; then EXIT_CODE=0; fi  # Default to success if unset
+      - if [ "$EXIT_CODE" -eq 0 ]; then ./scripts/log_migration.sh "SUCCESS"; else ./scripts/log_migration.sh "FAILURE"; fi
